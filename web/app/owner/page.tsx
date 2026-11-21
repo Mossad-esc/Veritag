@@ -225,12 +225,18 @@ export default function OwnerPortalPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void handleConnectPasskey()}
+            onClick={() => {
+              if (session) {
+                void handleConnectPasskey();
+              } else {
+                setPasskeyOnboardingOpen(true);
+              }
+            }}
             className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
           >
             {session
               ? `${session.label}: ${session.address.slice(0, 8)}...`
-              : "Sign in with Passkey (WebAuthn)"}
+              : "Create Passkey Wallet"}
           </button>
           {!session && (
             <button

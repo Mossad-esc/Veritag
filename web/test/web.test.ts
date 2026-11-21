@@ -7,6 +7,7 @@ import {
 import { registerPasskeySmartWallet } from "../lib/passkey.js";
 import {
   buildUnsignedRegistryTxXdr,
+  detectInstalledWallets,
   getFileDownloadUrl,
   isValidGtinFormat,
   PUBLIC_CONFIG,
@@ -14,6 +15,7 @@ import {
   signRegistryTxWithSecret,
   verifyProduct,
 } from "../lib/stellar.js";
+import { dispatchWalletConnection, type WalletSession } from "../lib/wallet-context.js";
 
 describe("@veritag/web verification & passkey wallet logic", () => {
   beforeEach(() => {
