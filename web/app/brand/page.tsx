@@ -275,6 +275,54 @@ export default function BrandDashboardPage() {
     );
   }
 
+  async function handleCsvWizardCommit(payload: BatchCommitPayload) {
+    const enc = new TextEncoder();
+    const batchDigest = await crypto.subtle.digest("SHA-256", enc.encode(payload.batchCode));
+    const batchId = Array.from(new Uint8Array(batchDigest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    if (session?.token) {
+      try {
+        const signedTxXdr = await signContractAction("commit_batch");
+        await fetch(`${PUBLIC_CONFIG.apiUrl}/v1/brands/batches`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.token}`,
+          },
+          body: JSON.stringify({
+            batchCode: payload.batchCode,
+            warrantyMonths: payload.warrantyMonths,
+            productMeta: { model: productSku, domain },
+            count: payload.units.length,
+            merkleRoot: payload.merkleRoot,
+            ...(signedTxXdr ? { signedTxXdr } : {}),
+          }),
+        });
+      } catch {
+        // Offline fallback
+      }
+    }
+
+    setBatches((prev) => [
+      {
+        batchCode: payload.batchCode,
+        batchId,
+        merkleRoot: payload.merkleRoot,
+        unitCount: payload.units.length,
+        activatedCount: 0,
+        warrantyMonths: payload.warrantyMonths,
+        recalled: false,
+      },
+      ...prev,
+    ]);
+    setVisualizedLeaves(payload.units.slice(0, 64).map((u) => ({ label: u.serial })));
+    setNotice(
+      `Committed CSV batch ${payload.batchCode} (${payload.units.length} units, root ${payload.merkleRoot.slice(0, 14)}...).`,
+    );
+  }
+
   async function handleExportBatch(batchId: string, purge: boolean) {
     if (session?.token) {
       try {

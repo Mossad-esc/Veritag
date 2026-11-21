@@ -86,9 +86,11 @@ export function Navbar() {
                     Stellar &amp; Soroban Wallets
                   </div>
                   <div className="space-y-2">
-                    <div className="rounded-xl bg-slate-50 p-2.5 text-xs">
-                      <div className="font-semibold text-slate-800">{session.label}</div>
-                      <div className="mt-1 break-all font-mono text-[11px] text-slate-500">
+                    <div className="rounded-xl bg-slate-50 p-2.5 text-xs dark:bg-slate-800">
+                      <div className="font-semibold text-slate-800 dark:text-slate-100">
+                        {session.label}
+                      </div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-slate-600 dark:text-slate-300">
                         {session.address}
                       </div>
                       <div className="mt-1 text-[11px] text-emerald-700 font-medium">
