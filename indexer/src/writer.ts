@@ -1,5 +1,5 @@
 import pg from "pg";
-import type { DecodedRegistryEvent } from "./decoder.js";
+import type { DecodedEvent } from "./decoder.js";
 
 export interface IndexerCursorState {
   lastLedger: number;
@@ -9,18 +9,20 @@ export interface IndexerCursorState {
 export interface IndexerWriter {
   getCursor(streamId?: string): Promise<IndexerCursorState>;
   saveCursor(state: IndexerCursorState, streamId?: string): Promise<void>;
-  applyEvent(event: DecodedRegistryEvent, finalized: boolean): Promise<{ applied: boolean }>;
-  finalizeEventsUpTo(confirmedLedger: number): Promise<number>;
+  applyEvent(event: DecodedEvent, finalized: boolean): Promise<{ applied: boolean }>;
+  finalizeEventsUpTo(confirmedLedger: number, minLedger?: number): Promise<number>;
 }
 
 const DEFAULT_STREAM_ID = "soroban-registry";
+const DEFAULT_PARTITION_SIZE = 100_000;
 
 export class InMemoryIndexerWriter implements IndexerWriter {
   private readonly cursors = new Map<string, IndexerCursorState>();
   public readonly events = new Map<
     string,
-    { event: DecodedRegistryEvent; finalized: boolean }
+    { event: DecodedEvent; finalized: boolean }
   >();
+  public readonly deployedAccounts = new Set<string>();
   public readonly brands = new Map<string, { domain: string; verified: boolean }>();
   public readonly batches = new Map<
     string,
@@ -51,7 +53,7 @@ export class InMemoryIndexerWriter implements IndexerWriter {
     this.cursors.set(streamId, { ...state });
   }
 
-  async applyEvent(event: DecodedRegistryEvent, finalized: boolean): Promise<{ applied: boolean }> {
+  async applyEvent(event: DecodedEvent, finalized: boolean): Promise<{ applied: boolean }> {
     const existing = this.events.get(event.id);
     if (existing) {
       if (finalized && !existing.finalized) {
@@ -158,16 +160,27 @@ export class InMemoryIndexerWriter implements IndexerWriter {
       case "service_center_registered":
       case "transfer_offered":
       case "transfer_cancelled":
+      case "passkey_added":
+      case "passkey_removed":
+      case "passkey_rotated":
+      case "recovery_updated":
+        break;
+      case "account_deployed":
+        this.deployedAccounts.add(event.account);
         break;
     }
 
     return { applied: true };
   }
 
-  async finalizeEventsUpTo(confirmedLedger: number): Promise<number> {
+  async finalizeEventsUpTo(confirmedLedger: number, minLedger = 0): Promise<number> {
     let count = 0;
     for (const [id, entry] of this.events.entries()) {
-      if (!entry.finalized && entry.event.ledger <= confirmedLedger) {
+      if (
+        !entry.finalized &&
+        entry.event.ledger >= minLedger &&
+        entry.event.ledger <= confirmedLedger
+      ) {
         this.events.set(id, { ...entry, finalized: true });
         count++;
       }
@@ -217,7 +230,7 @@ export class PostgresIndexerWriter implements IndexerWriter {
     );
   }
 
-  async applyEvent(event: DecodedRegistryEvent, finalized: boolean): Promise<{ applied: boolean }> {
+  async applyEvent(event: DecodedEvent, finalized: boolean): Promise<{ applied: boolean }> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -225,6 +238,23 @@ export class PostgresIndexerWriter implements IndexerWriter {
       const unitId = "unitId" in event ? event.unitId : null;
       const brand = "brand" in event ? event.brand : null;
       const batchId = "batchId" in event ? event.batchId : null;
+      const contractId = "contractId" in event ? (event.contractId ?? null) : null;
+
+      await client.query(
+        `INSERT INTO raw_events (id, contract_id, type, data, ledger, tx_hash, finalized, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+         ON CONFLICT (id, ledger) DO NOTHING`,
+        [
+          event.id,
+          contractId,
+          event.type,
+          JSON.stringify(event),
+          event.ledger,
+          event.txHash,
+          finalized,
+          event.createdAt,
+        ],
+      );
 
       const insertRes = await client.query(
         `INSERT INTO unit_events (id, unit_id, brand, batch_id, type, data, ledger, tx_hash, finalized, created_at)
@@ -248,6 +278,10 @@ export class PostgresIndexerWriter implements IndexerWriter {
       if (insertRes.rowCount === 0) {
         if (finalized) {
           await client.query(`UPDATE unit_events SET finalized = TRUE WHERE id = $1`, [event.id]);
+          await client.query(
+            `UPDATE raw_events SET finalized = TRUE WHERE id = $1 AND ledger = $2`,
+            [event.id, event.ledger],
+          );
         }
         await client.query("COMMIT");
         return { applied: false };
@@ -320,6 +354,20 @@ export class PostgresIndexerWriter implements IndexerWriter {
             `UPDATE units SET owner = $2, updated_at = NOW() WHERE unit_id = $1`,
             [event.unitId, event.to],
           );
+          await client.query(
+            `INSERT INTO unit_transfers (id, unit_id, from_account, to_account, ledger, tx_hash, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id, ledger) DO NOTHING`,
+            [
+              event.id,
+              event.unitId,
+              event.from,
+              event.to,
+              event.ledger,
+              event.txHash,
+              event.createdAt,
+            ],
+          );
           break;
 
         case "claim_filed": {
@@ -374,6 +422,17 @@ export class PostgresIndexerWriter implements IndexerWriter {
 
         case "transfer_offered":
         case "transfer_cancelled":
+        case "passkey_added":
+        case "passkey_removed":
+        case "passkey_rotated":
+        case "recovery_updated":
+          break;
+
+        case "account_deployed":
+          await client.query(
+            `UPDATE passkey_wallets SET deployed = TRUE WHERE wallet_address = $1`,
+            [event.account],
+          );
           break;
       }
 
@@ -387,11 +446,60 @@ export class PostgresIndexerWriter implements IndexerWriter {
     }
   }
 
-  async finalizeEventsUpTo(confirmedLedger: number): Promise<number> {
+  /**
+   * Promotes unfinalized events up to `confirmedLedger` using explicit `ledger` bounds
+   * so PostgreSQL partition pruning skips out-of-range `raw_events` partitions.
+   */
+  async finalizeEventsUpTo(confirmedLedger: number, minLedger = 0): Promise<number> {
     const res = await this.pool.query(
-      `UPDATE unit_events SET finalized = TRUE WHERE finalized = FALSE AND ledger <= $1`,
-      [confirmedLedger],
+      `UPDATE unit_events SET finalized = TRUE WHERE finalized = FALSE AND ledger >= $1 AND ledger <= $2`,
+      [minLedger, confirmedLedger],
+    );
+    await this.pool.query(
+      `UPDATE raw_events SET finalized = TRUE WHERE finalized = FALSE AND ledger >= $1 AND ledger <= $2`,
+      [minLedger, confirmedLedger],
     );
     return res.rowCount ?? 0;
+  }
+
+  /**
+   * Queries `raw_events` with explicit `ledger` bounds to guarantee partition pruning.
+   */
+  async getRawEventsInLedgerRange(
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<Array<{ id: string; contract_id: string | null; type: string; ledger: number }>> {
+    const res = await this.pool.query(
+      `SELECT id, contract_id, type, ledger FROM raw_events
+       WHERE ledger >= $1 AND ledger <= $2
+       ORDER BY ledger ASC`,
+      [fromLedger, toLedger],
+    );
+    return res.rows as Array<{
+      id: string;
+      contract_id: string | null;
+      type: string;
+      ledger: number;
+    }>;
+  }
+
+  /**
+   * Creates future 100,000-ledger partitions for `raw_events` and `unit_transfers`.
+   */
+  async ensurePartitionsForLedger(
+    currentLedger: number,
+    lookaheadPartitions = 1,
+    partitionSize = DEFAULT_PARTITION_SIZE,
+  ): Promise<void> {
+    const baseBucket = Math.floor(currentLedger / partitionSize) * partitionSize;
+    for (let i = 0; i <= lookaheadPartitions; i++) {
+      const start = baseBucket + i * partitionSize;
+      const end = start + partitionSize;
+      for (const table of ["raw_events", "unit_transfers"] as const) {
+        await this.pool.query(
+          `CREATE TABLE IF NOT EXISTS ${table}_p${start} PARTITION OF ${table} FOR VALUES FROM (${start}) TO (${end})`,
+        );
+      }
+    }
   }
 }

@@ -2,7 +2,12 @@ import { Address, Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { sha256 } from "@veritag/sdk";
 import type pg from "pg";
 import { describe, expect, it } from "vitest";
-import { decodeRegistryEvent, type RawSorobanEvent } from "../src/decoder.js";
+import {
+  decodeContractEvent,
+  decodeRegistryEvent,
+  type ContractKind,
+  type RawSorobanEvent,
+} from "../src/decoder.js";
 import { parseCliArgs } from "../src/index.js";
 import { IndexerPoller, type SorobanEventsProvider } from "../src/poller.js";
 import { InMemoryIndexerWriter, PostgresIndexerWriter } from "../src/writer.js";
@@ -272,5 +277,106 @@ describe("@veritag/indexer XDR decoder, poller, and idempotent writer", () => {
     const duplicateDecoded = decodeRegistryEvent(rawPage1[0]!)!;
     const dupRes = await pgWriter.applyEvent(duplicateDecoded, true);
     expect(dupRes.applied).toBe(false);
+  });
+
+  it("dispatches events across Registry, AccountFactory, and dynamically watched PasskeyAccount contracts", async () => {
+    const registryId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    const factoryId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCTY";
+    const deployedAccountId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPSKY";
+    const brand = Keypair.random().publicKey();
+    const oldCred = sha256("OLD-PASSKEY-CRED");
+    const newCred = sha256("NEW-PASSKEY-CRED");
+
+    const contractKinds = new Map<string, ContractKind>([
+      [registryId, "registry"],
+      [factoryId, "account_factory"],
+    ]);
+
+    const registryEvent: RawSorobanEvent = {
+      id: "000200-1",
+      ledger: 200,
+      txHash: "tx200",
+      contractId: registryId,
+      topic: [scSym("brand_registered"), scAddr(brand)],
+      value: scMap([["domain", xdr.ScVal.scvString("alpine-optics.ch")]]),
+    };
+
+    const deployEvent: RawSorobanEvent = {
+      id: "000201-1",
+      ledger: 201,
+      txHash: "tx201",
+      contractId: factoryId,
+      topic: [scSym("account_deployed")],
+      value: scMap([
+        ["account", xdr.ScVal.scvString(deployedAccountId)],
+        ["credential_id", scBytes32(oldCred)],
+      ]),
+    };
+
+    const rotationEvent: RawSorobanEvent = {
+      id: "000202-1",
+      ledger: 202,
+      txHash: "tx202",
+      contractId: deployedAccountId,
+      topic: [scSym("passkey_rotated")],
+      value: scMap([
+        ["old_credential_id", scBytes32(oldCred)],
+        ["new_credential_id", scBytes32(newCred)],
+      ]),
+    };
+
+    expect(decodeContractEvent(registryEvent, contractKinds)?.type).toBe("brand_registered");
+    expect(decodeContractEvent(deployEvent, contractKinds)?.type).toBe("account_deployed");
+    contractKinds.set(deployedAccountId, "passkey_account");
+    const decodedRotation = decodeContractEvent(rotationEvent, contractKinds);
+    expect(decodedRotation?.type).toBe("passkey_rotated");
+    if (decodedRotation?.type === "passkey_rotated") {
+      expect(decodedRotation.account).toBe(deployedAccountId);
+      expect(decodedRotation.newCredentialId).toBe(newCred.toString("hex"));
+    }
+
+    const writer = new InMemoryIndexerWriter();
+    let pollCycle = 0;
+    const watchedSnapshots: string[][] = [];
+
+    const multiProvider: SorobanEventsProvider = {
+      async fetchEvents(params) {
+        pollCycle++;
+        watchedSnapshots.push([...(params.contractIds ?? [])]);
+        if (pollCycle === 1) {
+          return {
+            latestLedger: 201,
+            cursor: "000201-1",
+            events: [registryEvent, deployEvent],
+          };
+        }
+        return {
+          latestLedger: 205,
+          cursor: "000202-1",
+          events: [rotationEvent],
+        };
+      },
+    };
+
+    const poller = new IndexerPoller({
+      contractIds: [registryId, factoryId],
+      contractKinds: {
+        [registryId]: "registry",
+        [factoryId]: "account_factory",
+      },
+      provider: multiProvider,
+      writer,
+    });
+
+    const first = await poller.pollOnce();
+    expect(first.applied).toBe(2);
+    expect(writer.deployedAccounts.has(deployedAccountId)).toBe(true);
+    expect(poller.getWatchedContractIds()).toContain(deployedAccountId);
+
+    const second = await poller.pollOnce();
+    expect(second.applied).toBe(1);
+    expect(watchedSnapshots[0]).toEqual([registryId, factoryId]);
+    expect(watchedSnapshots[1]).toContain(deployedAccountId);
+    expect(writer.events.get("000202-1")?.event.type).toBe("passkey_rotated");
   });
 });
