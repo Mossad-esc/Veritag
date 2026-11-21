@@ -17,14 +17,6 @@ interface BrandBatchSummary {
   recalled: boolean;
 }
 
-interface PrintableTagRow {
-  unitId: string;
-  serial: string;
-  scratchSecret: string;
-  qrUrl: string;
-  qrSvg?: string;
-}
-
 export default function BrandDashboardPage() {
   const { session, connectRoleKeypair, connectFreighter, signContractAction } = useWallet();
   const [domain, setDomain] = useState("chronos-watches.swiss");
@@ -32,6 +24,7 @@ export default function BrandDashboardPage() {
   const [serviceCenterInput, setServiceCenterInput] = useState("");
   const [authorizedCenters, setAuthorizedCenters] = useState<string[]>([]);
   const [exportedLabels, setExportedLabels] = useState<PrintableTagRow[]>([]);
+  const [printPreviewOpen, setPrintPreviewOpen] = useState(false);
 
   const [batches, setBatches] = useState<BrandBatchSummary[]>([
     {
@@ -385,6 +378,7 @@ export default function BrandDashboardPage() {
   }
 
   return (
+    <>
     <div className="mx-auto max-w-6xl px-4 py-10 space-y-8 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -431,13 +425,22 @@ export default function BrandDashboardPage() {
             <h2 className="text-base font-bold text-slate-900">
               Printable Packaging QR &amp; Scratch-Off Labels
             </h2>
-            <button
-              type="button"
-              onClick={() => setExportedLabels([])}
-              className="text-xs font-semibold text-slate-500 hover:text-slate-800"
-            >
-              Close Preview
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPrintPreviewOpen(true)}
+                className="rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+              >
+                Open Print Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => setExportedLabels([])}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+              >
+                Close Preview
+              </button>
+            </div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {exportedLabels.map((item) => (
@@ -655,5 +658,12 @@ export default function BrandDashboardPage() {
         </div>
       </div>
     </div>
+    {printPreviewOpen && (
+      <QrPrintPreviewModal
+        items={exportedLabels}
+        onClose={() => setPrintPreviewOpen(false)}
+      />
+    )}
+    </>
   );
 }

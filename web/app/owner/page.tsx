@@ -31,6 +31,7 @@ export default function OwnerPortalPage() {
   const { session, connectPasskey, connectRoleKeypair, signContractAction } = useWallet();
   const [products, setProducts] = useState<OwnedProductItem[]>(INITIAL_PRODUCTS);
   const [transferCode, setTransferCode] = useState<string | null>(null);
+  const [transferExpiresAt, setTransferExpiresAt] = useState<number | null>(null);
   const [redeemUnitId, setRedeemUnitId] = useState("");
   const [redeemCode, setRedeemCode] = useState("");
   const [serviceCenterAddr, setServiceCenterAddr] = useState("");
@@ -108,6 +109,7 @@ export default function OwnerPortalPage() {
             sponsoredTxHash?: string;
           };
           setTransferCode(data.transferCode);
+          setTransferExpiresAt(Math.floor(Date.now() / 1000) + 86_400);
           setFeedback(
             `Signed & generated 24-hour one-time resale code anchored to your unit.${
               data.sponsoredTxHash ? ` [Tx: ${data.sponsoredTxHash.slice(0, 12)}...]` : ""
@@ -121,6 +123,7 @@ export default function OwnerPortalPage() {
     }
     const code = `XFER-${unitId.slice(0, 4).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
     setTransferCode(code);
+    setTransferExpiresAt(Math.floor(Date.now() / 1000) + 86_400);
     setFeedback(
       "Generated 24-hour one-time resale code. Share this with the buyer to transfer ownership and remaining warranty.",
     );
@@ -314,12 +317,11 @@ export default function OwnerPortalPage() {
               </div>
 
               {transferCode && (
-                <div className="rounded-xl bg-slate-900 p-4 text-white">
-                  <div className="text-xs text-slate-400">One-Time Resale Transfer Code</div>
-                  <div className="mt-1 font-mono text-lg font-bold tracking-wider text-emerald-400">
-                    {transferCode}
-                  </div>
-                </div>
+                <TransferCountdownCard
+                  transferCode={transferCode}
+                  expiresAt={transferExpiresAt ?? undefined}
+                  onExpired={() => setTransferCode(null)}
+                />
               )}
             </div>
           ))
