@@ -2,7 +2,43 @@
 
 import { parseVerifyPath } from "@veritag/sdk";
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  isScanMuted,
+  playScanSuccessFeedback,
+  toggleScanMuted,
+} from "@/lib/feedback";
+
+/** Filters a list of media devices to only video input (camera) devices. */
+export function filterVideoInputDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
+  return devices.filter((d) => d.kind === "videoinput");
+}
+
+/** Detects whether a media stream track supports the torch (flashlight) capability. */
+export function detectTorchCapability(track: MediaStreamTrack | undefined): boolean {
+  if (!track || typeof track.getCapabilities !== "function") return false;
+  const caps = track.getCapabilities();
+  return Boolean((caps as unknown as { torch?: boolean }).torch);
+}
+
+/** Formats a user-friendly error message for camera access failures. */
+export function formatCameraError(err: unknown): string {
+  if (err instanceof DOMException) {
+    switch (err.name) {
+      case "NotAllowedError":
+        return "Camera permission denied. Please allow camera access in your browser settings, then try again.";
+      case "NotFoundError":
+        return "No camera found on this device. Paste the QR URL or upload an SVG label instead.";
+      case "NotReadableError":
+        return "Camera is in use by another application. Close it and try again.";
+      case "OverconstrainedError":
+        return "Selected camera is not available. Try a different camera or use the default.";
+      default:
+        return `Camera error: ${err.message}. Try pasting the QR URL below.`;
+    }
+  }
+  return "Unable to access camera. Try pasting the QR URL or uploading an SVG label.";
+}
 
 export function QrScanner() {
   const router = useRouter();
@@ -10,8 +46,18 @@ export function QrScanner() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanAnnouncement, setScanAnnouncement] = useState<string>("");
   const [cameraActive, setCameraActive] = useState(false);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(undefined);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [muted, setMuted] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const scanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setMuted(isScanMuted());
+  }, []);
 
   function routeFromQrPayload(rawPayload: string): boolean {
     setScanError(null);
@@ -37,16 +83,30 @@ export function QrScanner() {
     return false;
   }
 
-  async function handleStartCamera() {
+  async function enumerateVideoDevices(): Promise<MediaDeviceInfo[]> {
+    if (typeof window === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+      return [];
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return filterVideoInputDevices(devices);
+    } catch {
+      return [];
+    }
+  }
+
+  async function handleStartCamera(targetDeviceId?: string) {
     setScanError(null);
     if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setScanError("Camera access is not available in this browser.");
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-      });
+      const constraints: MediaStreamConstraints = targetDeviceId
+        ? { video: { deviceId: { exact: targetDeviceId } } }
+        : { video: { facingMode: "environment" } };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
       setCameraActive(true);
       setScanAnnouncement("Camera QR scanner started.");
@@ -65,17 +125,18 @@ export function QrScanner() {
 
       if (BarcodeDetectorCtor && videoRef.current) {
         const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
-        const interval = setInterval(async () => {
+        scanIntervalRef.current = setInterval(async () => {
           if (!videoRef.current || !streamRef.current) {
-            clearInterval(interval);
+            if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
             return;
           }
           try {
             const codes = await detector.detect(videoRef.current);
             const firstVal = codes[0]?.rawValue;
             if (firstVal) {
-              clearInterval(interval);
+              if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
               handleStopCamera();
+              playScanSuccessFeedback();
               routeFromQrPayload(firstVal);
             }
           } catch {
@@ -83,12 +144,16 @@ export function QrScanner() {
           }
         }, 400);
       }
-    } catch {
-      setScanError("Camera permission denied or no camera found. Upload SVG/QR or paste URL below.");
+    } catch (err) {
+      setScanError(formatCameraError(err));
     }
   }
 
   function handleStopCamera() {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
         track.stop();
@@ -110,6 +175,7 @@ export function QrScanner() {
         .replace(/&quot;/g, '"')
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">");
+      playScanSuccessFeedback();
       routeFromQrPayload(decoded);
       return;
     }
@@ -138,9 +204,27 @@ export function QrScanner() {
             aria-label="Stop camera QR scanner"
             className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
           >
-            Stop Camera
+            {muted ? "🔇" : "🔊"}
           </button>
-        )}
+
+          {!cameraActive ? (
+            <button
+              type="button"
+              onClick={() => handleStartCamera()}
+              className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+            >
+              Open Camera Scanner
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleStopCamera}
+              className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+            >
+              Stop Camera
+            </button>
+          )}
+        </div>
       </div>
 
       {cameraActive && (

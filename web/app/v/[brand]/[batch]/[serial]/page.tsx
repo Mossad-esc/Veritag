@@ -1,4 +1,5 @@
 import { ActivationDrawer } from "@/components/ActivationDrawer";
+import { ProvenanceTimeline } from "@/components/ProvenanceTimeline";
 import { StatusBanner } from "@/components/StatusBanner";
 import { fetchUnitTimeline, getFileDownloadUrl, verifyProduct } from "@/lib/stellar";
 
