@@ -1,4 +1,4 @@
-import type { ContractKind } from "./decoder.js";
+import { AlertService } from "./alerts.js";
 import { IndexerPoller, RpcEventsProvider } from "./poller.js";
 import { InMemoryIndexerWriter, PostgresIndexerWriter } from "./writer.js";
 
@@ -38,11 +38,15 @@ const databaseUrl =
   process.env.DATABASE_URL ?? "postgres://veritag:veritag@localhost:5432/veritag";
 const pollIntervalMs = Number(process.env.INDEXER_POLL_INTERVAL_MS ?? 5000);
 const confirmationLedgers = Number(process.env.INDEXER_CONFIRMATION_LEDGERS ?? 2);
+const healthPort = Number(process.env.INDEXER_HEALTH_PORT ?? process.env.PORT ?? 8080);
+const maxAllowedLag = Number(process.env.MAX_ALLOWED_LAG ?? 50);
+
+const alertService = new AlertService();
 
 const writer =
   process.env.USE_IN_MEMORY_DB === "true"
-    ? new InMemoryIndexerWriter()
-    : new PostgresIndexerWriter(databaseUrl);
+    ? new InMemoryIndexerWriter(alertService)
+    : new PostgresIndexerWriter(databaseUrl, alertService);
 
 const provider = new RpcEventsProvider(rpcUrl);
 const poller = new IndexerPoller({
@@ -67,6 +71,27 @@ export function parseCliArgs(argv: readonly string[]): {
   return { backfill, fromLedger, toLedger };
 }
 
+/**
+ * Creates a lightweight HTTP server exposing `GET /healthz` for container liveness/readiness checks.
+ */
+export function createHealthServer(
+  targetPoller: IndexerPoller,
+  maxLag = maxAllowedLag,
+): Server {
+  return createServer((req, res) => {
+    const urlPath = (req.url ?? "/").split("?")[0];
+    if (req.method === "GET" && urlPath === "/healthz") {
+      const health = targetPoller.getHealthStatus(maxLag);
+      const statusCode = health.status === "healthy" ? 200 : 503;
+      res.writeHead(statusCode, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: health.status, lag: health.lag }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+  });
+}
+
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   if (args.backfill) {
@@ -84,7 +109,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.log(`Veritag indexer started for contracts [${contractIds.join(", ")}] via ${rpcUrl}`);
+  const healthServer = createHealthServer(poller, maxAllowedLag);
+  healthServer.listen(healthPort, () => {
+    console.log(`[indexer] Healthcheck listening on :${healthPort}/healthz (MAX_ALLOWED_LAG=${maxAllowedLag})`);
+  });
+
+  console.log(`Veritag indexer started for contract ${contractId} via ${rpcUrl}`);
   while (true) {
     try {
       const stats = await poller.pollOnce();
