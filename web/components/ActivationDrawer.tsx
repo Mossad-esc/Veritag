@@ -67,7 +67,7 @@ export function ActivationDrawer({
 
   async function handleActivate(e: React.FormEvent) {
     e.preventDefault();
-    if (!secret.trim() || !ownerAddress.trim()) return;
+    if (disabled || !secret.trim() || !ownerAddress.trim()) return;
     setSubmitting(true);
     setStatusMsg("Verifying Merkle proof and sponsoring activation transaction...");
     try {

@@ -23,6 +23,7 @@ export default async function PublicVerifyPage({ params }: VerifyPageProps) {
 
   const summary = await verifyProduct(brand, batch, serial);
   const details = summary.unit ? await fetchUnitTimeline(summary.unitId) : { claims: [], timeline: [] };
+  const isRecalled = summary.status === "Recalled";
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8 space-y-6 sm:px-6">
@@ -191,8 +192,39 @@ export default async function PublicVerifyPage({ params }: VerifyPageProps) {
         </section>
       )}
 
-      {summary.status === "AuthenticInactive" && (
-        <ActivationDrawer brand={brand} batchId={batch} serial={serial} />
+      {summary.status === "AuthenticInactive" && !isRecalled && (
+        <ActivationDrawer brand={brand} batchId={batch} serial={serial} disabled={isRecalled} />
+      )}
+
+      {isRecalled && (
+        <section
+          id="recall-support"
+          className="rounded-2xl border border-red-300 bg-red-50 p-5 text-sm text-red-950 space-y-3"
+        >
+          <div className="font-semibold">
+            Warranty Activation &amp; Ownership Transfer Disabled
+          </div>
+          <p className="text-xs leading-relaxed">
+            This unit belongs to a recalled batch. Activation and transfer actions are blocked to
+            protect consumers.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled
+              className="rounded-xl bg-slate-300 px-4 py-2 text-xs font-semibold text-slate-600 cursor-not-allowed"
+            >
+              Activate Product (Disabled)
+            </button>
+            <button
+              type="button"
+              disabled
+              className="rounded-xl bg-slate-300 px-4 py-2 text-xs font-semibold text-slate-600 cursor-not-allowed"
+            >
+              Transfer Ownership (Disabled)
+            </button>
+          </div>
+        </section>
       )}
 
       <section className="rounded-2xl border border-slate-200 bg-slate-900 p-5 text-slate-200">

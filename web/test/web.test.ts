@@ -9,6 +9,12 @@ import {
   buildCertificateSvg,
 } from "../lib/certificate-generator.js";
 import { registerPasskeySmartWallet } from "../lib/passkey.js";
+
+vi.mock("canvas-confetti", () => ({
+  default: {
+    create: vi.fn(() => Object.assign(vi.fn(), { reset: vi.fn() })),
+  },
+}));
 import {
   buildUnsignedRegistryTxXdr,
   detectInstalledWallets,
