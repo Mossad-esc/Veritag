@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { type BackendConfig, loadConfig } from "./config.js";
 import { InMemoryRepository, type Repository } from "./db/repository.js";
 import { createV1Router } from "./routes/api.js";
+import { registerOpenApiRoutes } from "./routes/openapi.js";
 import { AuthService, SlidingWindowRateLimiter } from "./services/auth.js";
 import { type RelayerService, StellarFeeSponsorService } from "./services/relayer.js";
 import { SorobanTransactionService } from "./services/soroban-tx.js";
@@ -99,6 +100,9 @@ export function createApp(options: CreateAppOptions = {}): Hono {
       tomlFetch: options.tomlFetch,
     }),
   );
+
+  // OpenAPI JSON spec + Swagger UI
+  registerOpenApiRoutes(app);
 
   return app;
 }
